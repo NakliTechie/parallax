@@ -41,7 +41,7 @@ asker-to-target edge, and two conversations cannot ask each other at the same ti
 
 `ctx.sessionController.resolveAgent(id)` returns the target (restoring a stored one); `agent.followup(message)` queues it
 for the next turn; `ctx.sessions.flush(session)` confirms it is persisted, which is the queued receipt. Parlella never uses
-`steer`, which interrupts a running step. Receipts are read from the receiver's own inbox events, so they survive a
+`steer`, which interrupts a running step; delivery goes through `agent.send` with the receiver's wake setting. Receipts are read from the receiver's own inbox events, so they survive a
 restart.
 
 Each receiver has a setting for whether inbound messages may start a turn: `always`, `replies` (only answers to its own
@@ -57,9 +57,15 @@ with no files. The inbox and rate windows live in memory.
 The core uses only dsh context services and Web Crypto, with no Node imports, so it runs on desktop dsh and in a dsh
 Worker in the browser.
 
-## 5. Open before build
+## 5. Settled host questions (2026-11-10, dsh-v0.2.1-rc.5 source)
 
-- Can `source.kind` carry a plugin value such as `peer`, or must it be one of dsh's kinds?
-- Is the inbox splice that `peer_receipt` cancel needs available as a public method?
-- Do hosts that mask UUID-shaped text need short aliases for conversation ids?
-- Does a cold conversation's `resolveAgent` work in the browser Worker as on desktop?
+- **Source kind.** `MessageSourceMap` (`packages/llm/llm/src/message.ts`) is merge-extensible: each producer declares
+  its own `kind` and consumers fall through unknown kinds. Parlella declares `peer` and uses the `relay` context form.
+- **Cancel.** The agent's `Inbox` (`packages/core/agent/src/runtime-types.ts`) has public `replace` and `remove` for a
+  pending message, so `peer_receipt` with `cancel` removes a message the receiver has not claimed.
+- **Waking.** `agent.send(message, target, wakeup)` queues without starting a turn when `wakeup` is false. The receiver
+  setting maps onto it: `never` → never wake; `replies` → wake only for answers to its own requests; `always` → wake.
+- **Aliases.** Some hosts mask UUID-shaped text, so tools accept and show a short alias (`p_` plus 6 characters) for each
+  conversation as well as its id.
+- **Cold conversations in a browser Worker.** Assumed to work as on desktop (`resolveAgent` restores a stored one);
+  checked when Parlella runs inside Dish.
