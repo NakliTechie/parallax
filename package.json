@@ -1,6 +1,6 @@
 {
   "name": "dsh-parallax",
-  "version": "0.1.0-dev",
+  "version": "0.1.0-dev.2",
   "description": "Conversations in DeepSeek Harness (dsh) that talk to each other: send, ask and reply with receipts, delegate with approval, read a bounded peer summary.",
   "license": "MIT",
   "type": "module",
