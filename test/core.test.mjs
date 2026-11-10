@@ -295,7 +295,10 @@ test('a delegated child reports status to its parent; others cannot set one', as
   const p = new Parallax(host)
   await p.peer_delegate(root('A'), { task: 'Do it', acceptance: ['hello.txt exists', 'it says parallax'], reportWithin: '30m', tags: ['demo'] })
   host.rows.push({ id: 'D', title: 'Do it', running: true })
+  await p.peer_send(root('D'), { to: 'Alpha', kind: 'notice', summary: 'started', status: 'working' })
+  assert.equal(host.delivered.at(-1).wakeup, false, 'progress does not start a parent turn')
   const sent = await p.peer_send(root('D'), { to: 'Alpha', kind: 'notice', summary: 'finished', status: 'done' })
+  assert.equal(host.delivered.at(-1).wakeup, true)
   assert.equal(sent.ok, true)
   assert.match(host.delivered.at(-1).text, /status: done \(the sender's own report, not a verified result\)/)
   const child = (await p.peer_list(root('A'))).delegated[0]
