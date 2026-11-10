@@ -289,3 +289,85 @@ test('aliases are stable and distinct', () => {
   assert.notEqual(aliasOf('abc'), aliasOf('abd'))
   assert.match(aliasOf('0b6f3c1e-1111-2222-3333-444455556666'), /^p_[0-9a-z]{6}$/)
 })
+
+test('a delegated child reports status to its parent; others cannot set one', async () => {
+  const host = fakeHost()
+  const p = new Parallax(host)
+  await p.peer_delegate(root('A'), { task: 'Do it', acceptance: ['hello.txt exists', 'it says parallax'], reportWithin: '30m', tags: ['demo'] })
+  host.rows.push({ id: 'D', title: 'Do it', running: true })
+  const sent = await p.peer_send(root('D'), { to: 'Alpha', kind: 'notice', summary: 'finished', status: 'done' })
+  assert.equal(sent.ok, true)
+  assert.match(host.delivered.at(-1).text, /status: done \(the sender's own report, not a verified result\)/)
+  const child = (await p.peer_list(root('A'))).delegated[0]
+  assert.equal(child.status, 'done')
+  assert.deepEqual(child.acceptance, ['hello.txt exists', 'it says parallax'])
+  assert.deepEqual(child.tags, ['demo'])
+  assert.ok(child.reportBy)
+  assert.equal((await p.peer_send(root('B'), { to: 'Alpha', kind: 'notice', summary: 'x', status: 'done' })).refused, 'bad_status')
+  assert.equal((await p.peer_send(root('D'), { to: 'Alpha', kind: 'notice', summary: 'x', status: 'great' })).refused, 'bad_status')
+})
+
+test('an unfinished child past reportWithin is marked overdue; usage comes from the host', async () => {
+  const host = fakeHost()
+  host.stats = async () => ({ turns: 2, outputTokens: 900 })
+  const p = new Parallax(host)
+  await p.peer_delegate(root('A'), { task: 'Slow job', reportWithin: '90s' })
+  host.advance(91_000)
+  const child = (await p.peer_list(root('A'))).delegated[0]
+  assert.equal(child.overdue, true)
+  assert.deepEqual(child.usage, { turns: 2, outputTokens: 900 })
+  assert.equal((await p.peer_delegate(root('A'), { task: 'x', reportWithin: 'later' })).refused, 'bad_deadline')
+  assert.equal((await p.peer_delegate(root('A'), { task: 'x', tags: ['1', '2', '3', '4', '5', '6'] })).refused, 'too_many_tags')
+})
+
+test('an idempotency key returns the first result and sends nothing again', async () => {
+  const host = fakeHost()
+  const p = new Parallax(host)
+  const first = await p.peer_send(root('A'), { to: 'Beta', kind: 'notice', summary: 'once', key: 'k1' })
+  const again = await p.peer_send(root('A'), { to: 'Beta', kind: 'notice', summary: 'once', key: 'k1' })
+  assert.equal(again.duplicate, true)
+  assert.equal(again.id, first.id)
+  assert.equal(host.delivered.length, 1)
+  await p.peer_send(root('A'), { to: 'Gamma', kind: 'notice', summary: 'once', key: 'k1' })
+  assert.equal(host.delivered.length, 2, 'the key is per peer')
+})
+
+test('human first: messages wait while the receiver is busy, then go one per idle moment', async () => {
+  const host = fakeHost()
+  let busy = true
+  host.busy = async () => busy
+  const p = new Parallax(host)
+  await p.personSetBusy('B', 'human-first')
+  const first = await p.peer_send(root('A'), { to: 'Beta', kind: 'notice', summary: 'one' })
+  const second = await p.peer_send(root('A'), { to: 'Beta', kind: 'notice', summary: 'two' })
+  const third = await p.peer_send(root('A'), { to: 'Beta', kind: 'notice', summary: 'three' })
+  assert.match(first.state, /held/)
+  assert.equal(host.delivered.length, 0)
+  assert.equal((await p.peer_receipt(root('A'), { id: first.id })).delivery, 'held')
+  assert.equal((await p.peer_receipt(root('A'), { id: third.id, cancel: true })).result, 'cancelled')
+  const replaced = await p.peer_send(root('A'), { to: 'Beta', kind: 'notice', summary: 'two, revised', supersedes: second.id })
+  assert.equal(replaced.superseded, second.id)
+  assert.equal(await p.release('B'), false, 'still busy')
+  busy = false
+  assert.equal(await p.release('B'), true)
+  assert.match(host.delivered[0].text, /summary: one/)
+  assert.equal(await p.release('B'), true)
+  assert.match(host.delivered[1].text, /summary: two, revised/)
+  assert.equal(await p.release('B'), false, 'the cancelled one never goes')
+  assert.equal(host.delivered.length, 2)
+})
+
+test('approval routing: a delegated child maps to its parent and shows needs_parent while waiting', async () => {
+  const host = fakeHost()
+  const p = new Parallax(host)
+  await p.peer_delegate(root('A'), { task: 'Needs a shell' })
+  assert.equal(p.approvalRoute('D').parentId, 'A')
+  assert.equal(p.approvalRoute('B'), undefined)
+  p.noteApproval('D', { toolName: 'bash', reason: 'rm build/' })
+  host.rows.push({ id: 'D', title: 'Needs a shell', running: true })
+  const waiting = (await p.peer_list(root('A'))).delegated[0]
+  assert.equal(waiting.status, 'needs_parent')
+  assert.equal(waiting.waitingApproval.toolName, 'bash')
+  p.noteApproval('D', undefined)
+  assert.equal((await p.peer_list(root('A'))).delegated[0].status, 'working')
+})

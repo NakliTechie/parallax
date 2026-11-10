@@ -28,8 +28,8 @@ operation: conversations reach each other and delegate with no card unless the p
 | 19 | Start a new conversation for a task | CA | have | `peer_delegate` |
 | 20 | Child permissions no wider than the caller's, read back, fail closed | CA | have | preset and overrides copied, narrower preset allowed, read back before the first turn |
 | 21 | Track delegated conversations: state, report count | CA | have | `peer_list` `delegated`, `delegatedBy` |
-| 22 | Child asks its parent to approve a permission raise | CA | missing | Next: route the child's approval request to the parent as a peer request, decided by the parent's person |
-| 23 | Spawn with another model, agent preset or tags | CA | partial | Permission preset only; model, agent preset and tags are next |
+| 22 | Child asks its parent to approve a permission raise | CA | have | the child's dsh approval prompt is shown to the person in the parent conversation (`approvalRelay`); a closed card falls back to the child; `needs_parent` status meanwhile |
+| 23 | Spawn with another model, agent preset or tags | CA | have | `peer_delegate` `model` (from the profile's `models` list when set; the person's default model is kept), `agentPreset`, `tags` |
 | 24 | Rename or archive another conversation | CA | out | Changes a conversation the person owns; person-only |
 | 25 | Consent card per pair, once or session | PS, PI | have | `consent: ask`; default is automatic |
 | 26 | Person can close a pair for good | PS | have | `/peer revoke` blocks until `/peer connect` |
@@ -39,11 +39,14 @@ operation: conversations reach each other and delegate with no card unless the p
 | 30 | Subagents may not use peer tools | PS, AP | have | `subagent` refusal |
 | 31 | Grants and open requests survive a restart | PS, PI | have | plugin records in the session log (checked in real dsh, 2026-11-10) |
 | 32 | Handover: summarise this conversation for another | PI | partial | The model writes the summary and sends it with `peer_send`; no dedicated action |
-| 33 | Idempotent resend (`retryOf`, duplicate ids) | PI | missing | Next: an optional idempotency key on `peer_send` |
+| 33 | Idempotent resend (`retryOf`, duplicate ids) | PI | have | `peer_send` `key`: a resend with the same key to the same peer returns the first result for 24 h |
 | 34 | Claude Code bridge | AP | out | Node sockets; cross-agent messaging is a NakliOS-level A2A service |
 | 35 | Cross-machine relay | PI | out | Same reason as 34 |
-| 36 | Busy-peer policy "human first" | PI | missing | Next: a receiver setting that holds peer messages while a person's message is pending |
+| 36 | Busy-peer policy "human first" | PI | have | `/peer busy human-first`: peer messages wait while the receiver runs or has a person's message pending, then go in one per idle moment |
 | 37 | Person-facing commands | PS, PI | have | `/peer connect`, `/peer revoke`, `/peer wake`, `/peers` |
 | 38 | Runs in a browser Worker (Dish) | PS | have | no Node imports; Dish mount in NakliOS |
+| 39 | Task result status | Atomic Agent Fusion | have | `peer_send` `status` from a delegated child: working, done, failed, needs_parent; marked as the child's own claim |
+| 40 | Acceptance list for a delegated task | Atomic Agent Fusion | have | `peer_delegate` `acceptance`, shown read-only to the child; the parent checks it |
+| 41 | Per-delegation time limit and usage | Atomic Agent Fusion | have | `reportWithin` (overdue in `peer_list`), child turns and output tokens in `peer_list`; no spend cap, because enforcing one means interrupting |
 
-Count: 29 have, 2 partial, 3 missing, 4 out of 38.
+Count: 36 have, 1 partial (handover), 0 missing, 4 out, of 41 (rows 39–41 from Atomic Agent's Fusion mode, MIT).

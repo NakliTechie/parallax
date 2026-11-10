@@ -22,19 +22,19 @@ An agent using Parallax can rely on these, and on nothing else:
 5. **Bounded.** Hop limit 3 (counted before consent), 30 messages per minute per pair, summary 500 characters, body 16 KiB,
    inbox 50, peer context 4 KiB per message and 16 KiB in total.
 
-Person-only acts (never a tool): reopen or close a pair, change whether inbound messages may start a turn, and choose
-the consent mode. Everything else is available to the agent as a tool. Parity with the four source plugins: `docs/parity.md`.
+Person-only acts (never a tool): reopen or close a pair, change whether inbound messages may start a turn or wait for
+the person (`/peer busy`), answer a delegated conversation's permission prompt, and choose the consent mode. Everything else is available to the agent as a tool. Parity with the four source plugins: `docs/parity.md`.
 
 ## 1. Tools
 
 | Tool | Arguments | Returns | Source of the idea |
 |---|---|---|---|
 | `peer_list` | none | Reachable conversations (id, title, running or idle), open channels (tier, remaining, hops), unanswered requests | dsh-peer-sessions (one call plans) |
-| `peer_send` | `to` or `broadcast` (up to 20), `kind` (`notice`, `request`, `reply`), `summary`, `body?`, `replyTo?` (inferred when one request is open), `replyWithin?`, `waitMs?` (ask and wait), `urgent?` (next step), `wake?`, `supersedes?` | Message id, request id, delivery state; with `waitMs`, the reply | peer-sessions kinds, deadline and merge; pi-intercom ask, reply inference; approval broadcast |
+| `peer_send` | `to` or `broadcast` (up to 20), `kind` (`notice`, `request`, `reply`), `summary`, `body?`, `replyTo?` (inferred when one request is open), `replyWithin?`, `waitMs?` (ask and wait), `urgent?` (next step), `wake?`, `supersedes?`, `status?` (a delegated child's report), `key?` (idempotent resend) | Message id, request id, delivery state (`held` for a human-first receiver); with `waitMs`, the reply | peer-sessions kinds, deadline and merge; pi-intercom ask, reply inference, idempotence; approval broadcast; Atomic Agent Fusion status |
 | `peer_inbox` | `id?`, `pending?` | Inbound messages with read, answered and overdue marks, or one full message | peer-sessions inbox, pi-intercom `pending` |
 | `peer_receipt` | `id`, `waitMs?`, `cancel?` | `queued`, `claimed`, `discarded`, `unknown`; for a request `answered` (with the reply) or `overdue`; with `cancel`, `cancelled` or `already_claimed` | cross-session-agent-pre receipts, pi-intercom ask edges and cancel |
 | `peer_context` | `to`, `view?` (`overview`, `activity`), `maxMessages?` (1–8) | Bounded, escaped summary of a peer's goal, todos and recent messages, with a trust warning | cross-session-agent-pre whitelist and caps, peer-sessions progress |
-| `peer_delegate` | `task`, `title?`, `permission?` (a narrower preset) | A child conversation id; preset and sandbox/approval overrides copied or narrowed, read back before the first turn | cross-session-approval clamp, read-back and fail-closed |
+| `peer_delegate` | `task`, `title?`, `permission?` (a narrower preset), `model?`, `agentPreset?`, `tags?`, `acceptance?`, `reportWithin?` | A child conversation id; preset and sandbox/approval overrides copied or narrowed, read back before the first turn. The child's permission prompts go to the parent's person | cross-session-approval clamp, read-back, spawn options and approval bridge; Atomic Agent Fusion acceptance list and time limit |
 
 Rules: only a live, top-level conversation may call these tools; subagents may not. Replies are accepted only along the
 asker-to-target edge, and two conversations cannot ask each other at the same time (pi-intercom).
