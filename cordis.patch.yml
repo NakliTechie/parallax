@@ -1,0 +1,6 @@
+# Parallax's bundle layer: one plugin row. Configure with an id-targeted patch, for example
+#   - id: dsh-parallax
+#     config: { consent: ask, delegateApproval: ask, defaultWake: replies, maxHops: 3 }
+- insert:
+    - id: dsh-parallax
+      name: dsh-parallax

@@ -1,4 +1,4 @@
-# Notes for agents working on Parlella
+# Notes for agents working on Parallax
 
 - Public plugin: no NakliOS imports, no local paths or private conventions in shipped files. Dish-specific glue lives in the NakliOS repo, not here.
 - Reimplement from the four source plugins' behaviour; never copy their code. Record which idea came from where in commit messages.

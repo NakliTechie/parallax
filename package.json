@@ -1,5 +1,5 @@
 {
-  "name": "dsh-parlella",
+  "name": "dsh-parallax",
   "version": "0.1.0-dev",
   "description": "Conversations in DeepSeek Harness (dsh) that talk to each other: send, ask and reply with receipts, delegate with approval, read a bounded peer summary.",
   "license": "MIT",
@@ -11,10 +11,35 @@
     "./core": "./src/core.js",
     "./manifest": "./src/manifest.js"
   },
-  "files": ["src", "README.md", "LICENSE"],
-  "keywords": ["dsh", "dsh-plugin", "deepseek-harness", "agents", "messaging"],
+  "files": [
+    "src",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "agents",
+    "messaging"
+  ],
   "scripts": {
     "test": "node --import ./test/stubs/register.mjs --test test/*.test.mjs"
   },
-  "engines": { "node": ">=20" }
+  "engines": {
+    "node": ">=20"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-llm": ">=0.2.1-rc.5",
+    "@deepseek-ai/dsh-sandbox-policy": ">=0.2.1-rc.5",
+    "@deepseek-ai/dsh-session": ">=0.2.1-rc.5",
+    "@deepseek-ai/dsh-tools": ">=0.2.1-rc.5",
+    "@deepseek-ai/dsh-user-approval": ">=0.2.1-rc.5"
+  }
 }

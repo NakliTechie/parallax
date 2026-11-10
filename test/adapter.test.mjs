@@ -13,6 +13,13 @@ function fakeDsh({ answer = 'Allow for this session' } = {}) {
     const session = { id, header: { cwd: '/work', ...header }, events: [] }
     const inbox = {
       nextTurn: [], nextStep: [],
+      replace(messageId, message) {
+        const i = this.nextTurn.findIndex(m => m.id === messageId)
+        if (i < 0) return false
+        this.nextTurn[i] = message
+        session.events.push({ type: 'agent/inbox/spliced', data: { target: 'next-turn', start: i, removedCount: 1, inserted: [message], outcome: 'canceled' } })
+        return true
+      },
       remove(messageId) {
         const i = this.nextTurn.findIndex(m => m.id === messageId)
         if (i < 0) return false
@@ -24,8 +31,9 @@ function fakeDsh({ answer = 'Allow for this session' } = {}) {
     const agent = {
       id, session, inbox, woke: [],
       send(message, target, wakeup) {
-        inbox.nextTurn.push(message)
-        session.events.push({ type: 'agent/inbox/spliced', data: { target, start: inbox.nextTurn.length - 1, removedCount: 0, inserted: [message] } })
+        const list = target === 'next-step' ? inbox.nextStep : inbox.nextTurn
+        list.push(message)
+        session.events.push({ type: 'agent/inbox/spliced', data: { target, start: list.length - 1, removedCount: 0, inserted: [message] } })
         agent.woke.push(wakeup)
       },
       followup(message) { agent.send(message, 'next-turn', true) },
@@ -41,25 +49,26 @@ function fakeDsh({ answer = 'Allow for this session' } = {}) {
     return agent
   }
   let created = 0
+  const overrides = (type, field) => ({ overrideOf: session => session.events.filter(e => e.type === type).at(-1)?.data[field] })
   const ctx = {
     asked: [],
     effect: fn => fn(),
-    get: name => ({ workspaceRegistry: { archivedSessionIds: ['Z'] }, permissionPresets: ctx.permissionPresets })[name],
+    get: name => ({ workspaceRegistry: { archivedSessionIds: ['Z'] }, permissionPresets: ctx.permissionPresets, sandboxPolicy: overrides('sandbox/mode', 'mode'), approval: overrides('approval/policy', 'policy') })[name],
     tools: { register: def => { tools.set(def.name, def); return () => tools.delete(def.name) } },
     commands: { register: def => { commands.set(def.name, def); return () => commands.delete(def.name) } },
     agents: { get: id => agents.get(id), roots: () => [...agents.values()].filter(a => a.session.header.origin !== 'subagent') },
     sessions: { flush: async () => true },
     sessionController: {
-      list: async () => ({ items: [...sessions].map(([sessionId, s]) => ({ sessionId, running: false, blank: s.blank, origin: s.header.origin, projections: { values: { title: s.title } } })) }),
+      list: async () => ({ items: [...sessions].map(([sessionId, s]) => ({ sessionId, running: false, blank: s.blank, origin: s.header.origin, cwd: s.header.cwd ?? '/work', projections: { values: { title: s.title } } })) }),
       resolveAgent: async id => (agents.get(id) ? { agent: agents.get(id) } : { error: { message: 'not found' } }),
       projections: async () => ({ kind: 'sequenced', values: { goal: { goal: { objective: 'Ship', phase: 'active' } }, todos: [{ content: 'test', status: 'pending' }] } }),
       create: async () => { const id = `N${++created}`; makeAgent(id, 'new'); return { sessionId: id } },
     },
     sessionQuery: { readSession: async id => ({ events: agents.get(id)?.session.events ?? [] }), readTitle: async () => undefined },
-    userQuestions: { ask: async request => { ctx.asked.push(request); return { answers: [{ id: 'parlella', selected: [typeof answer === 'function' ? answer(request) : answer] }] } } },
+    userQuestions: { ask: async request => { ctx.asked.push(request); return { answers: [{ id: 'parallax', selected: [typeof answer === 'function' ? answer(request) : answer] }] } } },
     permissionPresets: { current: session => presetOf.get(session), set: (session, name) => presetOf.set(session, name) },
   }
-  makeAgent('A', 'Alpha'); makeAgent('B', 'Beta'); makeAgent('S', 'Sub', { origin: 'subagent', delegationDepth: 1 }); makeAgent('Z', 'Archived')
+  makeAgent('A', 'Alpha'); makeAgent('B', 'Beta'); makeAgent('O', 'Other folder', { cwd: '/elsewhere' }); makeAgent('S', 'Sub', { origin: 'subagent', delegationDepth: 1 }); makeAgent('Z', 'Archived')
   return { ctx, tools, commands, agents, presetOf }
 }
 
@@ -77,7 +86,7 @@ test('registers six tools and two person commands', async () => {
   assert.deepEqual([...env.commands.keys()], ['peer', 'peers'])
 })
 
-test('list hides subagents and archived conversations; subagent callers are refused', async () => {
+test('list hides subagents, archived conversations and other folders; subagent callers are refused', async () => {
   const env = fakeDsh()
   ;(await load()).apply(env.ctx)
   const listed = await call(env, 'peer_list', 'A', {})
@@ -102,7 +111,18 @@ test('send → relay message in the peer inbox → claimed → receipt; reply tr
   const receipt = await call(env, 'peer_receipt', 'A', { id: sent.requestId })
   assert.equal(receipt.request, 'answered')
   assert.equal(receipt.reply.summary, 'green')
-  assert.ok(env.agents.get('A').session.events.some(e => e.type === 'plugin:dsh-parlella/v1' && e.data.type === 'channel'))
+  assert.ok(env.agents.get('A').session.events.some(e => e.type === 'plugin:dsh-parallax/v1' && e.data.type === 'channel'))
+})
+
+test('peer_context shows only what people, peers and the model said', async () => {
+  const env = fakeDsh()
+  ;(await load()).apply(env.ctx)
+  env.agents.get('B').session.events.push(
+    { type: 'user/message', data: { id: 'u1', content: [{ type: 'text', text: 'person text' }], source: { kind: 'user' } } },
+    { type: 'user/message', data: { id: 'u2', content: [{ type: 'text', text: 'runtime note' }], source: { kind: 'runtime-context' } } },
+    { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: 'model text' }] } } })
+  const out = await call(env, 'peer_context', 'A', { to: 'Beta' })
+  assert.deepEqual(out.messages.map(m => m.text), ['person text', 'model text'])
 })
 
 test('cancel removes a queued message from the dsh inbox and reads back as discarded', async () => {
@@ -113,17 +133,39 @@ test('cancel removes a queued message from the dsh inbox and reads back as disca
   assert.equal(env.agents.get('B').inbox.nextTurn.length, 0)
 })
 
+test('urgent lands in next-step; supersedes swaps the queued dsh message', async () => {
+  const env = fakeDsh()
+  ;(await load()).apply(env.ctx)
+  await call(env, 'peer_send', 'A', { to: 'Beta', kind: 'notice', summary: 'now', urgent: true })
+  assert.equal(env.agents.get('B').inbox.nextStep.length, 1)
+  const first = await call(env, 'peer_send', 'A', { to: 'Beta', kind: 'notice', summary: 'v1' })
+  const second = await call(env, 'peer_send', 'A', { to: 'Beta', kind: 'notice', summary: 'v2', supersedes: first.id })
+  assert.equal(second.superseded, first.id)
+  assert.equal(env.agents.get('B').inbox.nextTurn.length, 1)
+  assert.match(env.agents.get('B').inbox.nextTurn[0].content[0].text, /summary: v2/)
+})
+
+test('consent ask mode shows one card', async () => {
+  const env = fakeDsh()
+  ;(await load()).apply(env.ctx, { consent: 'ask' })
+  await call(env, 'peer_send', 'A', { to: 'Beta', kind: 'notice', summary: 'hi' })
+  await call(env, 'peer_send', 'A', { to: 'Beta', kind: 'notice', summary: 'hi again' })
+  assert.equal(env.ctx.asked.length, 1)
+})
+
 test('a restart rehydrates grants from the session log', async () => {
   const env = fakeDsh()
   ;(await load()).apply(env.ctx)
   await call(env, 'peer_send', 'A', { to: 'Beta', kind: 'notice', summary: 'one' })
-  ;(await load()).apply(env.ctx) // a new module instance: memory is empty, the log is not
+  ;(await load()).apply(env.ctx, { consent: 'ask' }) // a new module instance: memory is empty, the log is not
   await call(env, 'peer_send', 'A', { to: 'Beta', kind: 'notice', summary: 'two' })
-  assert.equal(env.ctx.asked.length, 1, 'no second consent card after a restart')
+  assert.equal(env.ctx.asked.length, 0, 'the grant from the log is reused, so no card even in ask mode')
 })
 
-test('delegate: approval, preset copied and read back, first turn queued; refused when read-back differs', async () => {
-  const env = fakeDsh({ answer: request => (request.questions[0].header === 'Delegate a task' ? 'Start it' : 'Allow for this session') })
+test('delegate: preset copied and read back, narrower preset accepted, wider refused, refused when read-back differs', async () => {
+  const env = fakeDsh()
+  env.ctx.permissionPresets.names = ['read-only', 'workspace', 'full']
+  env.ctx.permissionPresets.resolve = name => ({ 'read-only': { sandbox: 'read-only', approval: 'ask' }, workspace: { sandbox: 'workspace-write', approval: 'ask' }, full: { sandbox: 'danger-full-access', approval: 'ask' } })[name]
   ;(await load()).apply(env.ctx)
   env.presetOf.set(env.agents.get('A').session, 'read-only')
   const out = await call(env, 'peer_delegate', 'A', { task: 'Summarise the README' })
@@ -131,6 +173,19 @@ test('delegate: approval, preset copied and read back, first turn queued; refuse
   const child = env.agents.get(out.childId)
   assert.equal(env.presetOf.get(child.session), 'read-only')
   assert.match(child.inbox.nextTurn[0].content[0].text, /delegated task/)
+  env.presetOf.set(env.agents.get('A').session, 'workspace')
+  const narrower = await call(env, 'peer_delegate', 'A', { task: 'Read only please', permission: 'read-only' })
+  assert.equal(env.presetOf.get(env.agents.get(narrower.childId).session), 'read-only')
+  assert.equal((await call(env, 'peer_delegate', 'A', { task: 'Wider', permission: 'full' })).refused, 'not_started')
+  // dsh's access-mode picker leaves a sandbox and approval override on the caller; the child gets the same, narrowed by a preset.
+  const caller = env.agents.get('A').session
+  caller.events.push({ type: 'sandbox/mode', data: { mode: 'danger-full-access' } }, { type: 'approval/policy', data: { policy: 'never' } })
+  const copied = await call(env, 'peer_delegate', 'A', { task: 'Copy my overrides' })
+  const copiedChild = env.agents.get(copied.childId).session
+  assert.equal(env.ctx.get('sandboxPolicy').overrideOf(copiedChild), 'danger-full-access')
+  assert.equal(env.ctx.get('approval').overrideOf(copiedChild), 'never')
+  const narrowed = await call(env, 'peer_delegate', 'A', { task: 'Narrow me', permission: 'read-only' })
+  assert.equal(env.ctx.get('sandboxPolicy').overrideOf(env.agents.get(narrowed.childId).session), 'read-only')
   env.ctx.permissionPresets.set = () => {} // a host that ignores the write
   const refused = await call(env, 'peer_delegate', 'A', { task: 'Again' })
   assert.equal(refused.refused, 'not_started')

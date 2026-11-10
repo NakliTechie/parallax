@@ -1,17 +1,21 @@
-// Parlella's core: channels, consent, mailbox, receipts, replies and delegation rules.
-// No host imports. A host adapter (src/dsh.js for DeepSeek Harness) supplies the `host` object described below.
+// Parallax's core: channels, mailbox, receipts, replies and delegation rules. No host imports.
+// Automated operation comes first: by default conversations reach each other and delegate without a consent card.
+// The person keeps the brakes: /peer revoke blocks a pair until /peer connect, `consent: 'ask'` restores cards, and the
+// hop limit, rate limit, size limits and no-authority stamp hold in every mode.
 //
+// A host adapter (src/dsh.js for DeepSeek Harness) supplies:
 // host = {
 //   now(): number                                   epoch ms
 //   randomId(): string                              unique id
-//   list(): Promise<{id, title, running}[]>         reachable top-level conversations (not archived, not blank, not subagents)
+//   list(selfId): Promise<{id, title, running}[]>   top-level conversations the caller may reach (same workspace by default;
+//                                                   not archived, not blank, not subagents), the caller included
 //   askPerson(sessionId, {header, question, detail, options: string[]}, signal): Promise<string | undefined>
-//                                                   the chosen option label; undefined when closed or unanswered
-//   deliver(toId, {text, wakeup, meta}): Promise<{messageId}>   queue a message in the target conversation
+//   deliver(toId, {text, target, wakeup, meta}): Promise<{messageId}>   target: 'next-turn' | 'next-step'
+//   replace(toId, messageId, {text, meta}): Promise<{messageId} | undefined>   swap a still-queued message
 //   deliveryState(toId, messageId): Promise<'queued' | 'claimed' | 'discarded' | 'unknown'>
 //   withdraw(toId, messageId): Promise<boolean>     remove a still-queued message; false when already claimed
 //   context(toId, {view, maxMessages}): Promise<{goal?, todos?: {text, done}[], messages?: {role, text}[], activity?: string[]}>
-//   delegate(callerId, {task, title}): Promise<{childId} | {refused: string}>   permissions clamped and read back by the host
+//   delegate(callerId, {task, title, permission?}): Promise<{childId} | {refused: string}>   permissions clamped and read back
 //   record(sessionId, data): void | Promise<void>   append a durable record to that conversation's log
 // }
 //
@@ -21,6 +25,7 @@ import { LIMITS, MARKER, aliasOf, byteLength, clip, containsMarker, escapeText, 
 
 const RECORD_VERSION = 1
 const HOP_MEMORY_MS = 15 * 60_000
+const BROADCAST_MAX = 20
 const CHOICE = Object.freeze({ once: 'Allow once', session: 'Allow for this session', decline: 'Decline' })
 const WAKE = new Set(['always', 'replies', 'never'])
 
@@ -32,11 +37,15 @@ const sleep = (ms, signal) => new Promise(resolve => {
   signal?.addEventListener('abort', done, { once: true })
 })
 
-export class Parlella {
+export class Parallax {
   constructor(host, options = {}) {
     this.host = host
+    this.consent = options.consent === 'ask' ? 'ask' : 'auto'
+    this.delegateApproval = options.delegateApproval === 'ask' ? 'ask' : 'auto'
     this.defaultWake = WAKE.has(options.defaultWake) ? options.defaultWake : 'always'
-    this.channels = new Map() // pairKey -> {a, b, tier, remaining, createdBy, openRequest}
+    this.maxHops = Number.isInteger(options.maxHops) && options.maxHops > 0 && options.maxHops <= 10 ? options.maxHops : LIMITS.hops
+    this.channels = new Map() // pairKey -> {a, b, tier, remaining, createdBy, openRequest, auto}
+    this.blocked = new Set() // pairKeys the person closed; only /peer connect reopens them
     this.messages = new Map() // message id -> message
     this.requests = new Map() // request id -> {id, asker, target, messageId, dueAt, answer, cancelled}
     this.inboxes = new Map() // session id -> message ids, oldest first
@@ -44,6 +53,7 @@ export class Parlella {
     this.hopsSeen = new Map() // session id -> [{hop, at}]
     this.rate = new Map() // `${from}\u0000${to}` -> send times
     this.wake = new Map() // session id -> always | replies | never
+    this.children = new Map() // child id -> {parent, title, startedAt, lastReportAt, reports}
     this.waiters = new Map() // request id -> Set(resolve)
   }
 
@@ -56,14 +66,18 @@ export class Parlella {
       if (data.type === 'channel' && typeof data.a === 'string' && typeof data.b === 'string') {
         const key = pairKey(data.a, data.b)
         if (data.op === 'revoke') this.channels.delete(key)
+        else if (data.op === 'block') { this.channels.delete(key); this.blocked.add(key) }
         else if (data.op === 'grant' && (data.tier === 'once' || data.tier === 'session')) {
-          this.channels.set(key, { a: data.a, b: data.b, tier: data.tier, remaining: Number(data.remaining) || 1, createdBy: sessionId, openRequest: data.openRequest })
+          this.blocked.delete(key)
+          this.channels.set(key, { a: data.a, b: data.b, tier: data.tier, remaining: Number(data.remaining) || 1, createdBy: sessionId, openRequest: undefined, auto: Boolean(data.auto) })
         }
       } else if (data.type === 'wake' && data.session === sessionId) {
         this.wake.set(sessionId, WAKE.has(data.setting) ? data.setting : 'never')
       } else if (data.type === 'request' && data.asker === sessionId && typeof data.id === 'string') {
         if (data.op === 'open') this.requests.set(data.id, { id: data.id, asker: data.asker, target: data.target, messageId: data.messageId, dueAt: data.dueAt, answer: undefined, cancelled: false })
         else this.requests.delete(data.id)
+      } else if (data.type === 'child' && typeof data.childId === 'string') {
+        this.children.set(data.childId, { parent: sessionId, title: data.title, startedAt: data.at, lastReportAt: undefined, reports: 0 })
       }
     }
   }
@@ -75,20 +89,20 @@ export class Parlella {
   // ---- lookups -----------------------------------------------------------------------------------------------
 
   async #reachable(selfId) {
-    const rows = await this.host.list()
+    const rows = await this.host.list(selfId)
     return rows.filter(row => row.id !== selfId).map(row => ({ ...row, alias: aliasOf(row.id) }))
   }
 
   async #resolve(selfId, ref) {
     const wanted = String(ref ?? '').trim()
     if (!wanted) return { error: refuse('no_peer', 'Name the peer: its alias, id or exact title from peer_list.') }
+    if (wanted === selfId || wanted === aliasOf(selfId)) return { error: refuse('self', 'That is this conversation.') }
     const rows = await this.#reachable(selfId)
     const exact = rows.filter(row => row.id === wanted || row.alias === wanted)
     if (exact.length === 1) return { peer: exact[0] }
     const titled = rows.filter(row => row.title === wanted)
     if (titled.length === 1) return { peer: titled[0] }
     if (titled.length > 1) return { error: refuse('ambiguous_peer', `More than one conversation is titled "${wanted}": ${titled.map(row => row.alias).join(', ')}. Use an alias.`) }
-    if (wanted === selfId || wanted === aliasOf(selfId)) return { error: refuse('self', 'That is this conversation.') }
     return { error: refuse('unknown_peer', `No reachable conversation matches "${wanted}". Call peer_list.`) }
   }
 
@@ -117,29 +131,50 @@ export class Parlella {
     return 'open'
   }
 
-  // ---- consent -----------------------------------------------------------------------------------------------
+  #replyView(request) {
+    const reply = this.messages.get(request.answer)
+    return reply ? { id: reply.id, summary: escapeText(reply.summary), text: formatDelivered(reply) } : { id: request.answer, note: 'The reply arrived before a restart; its text is in your conversation.' }
+  }
 
-  // Open a channel with the person's approval, or return the existing one. The model never sees or picks the tier.
+  // Resolve when the request has an answer or is withdrawn, or after waitMs; true when it timed out.
+  async #waitForAnswer(request, waitMs, signal) {
+    if (request.answer || request.cancelled) return false
+    const answered = new Promise(resolve => {
+      const set = this.waiters.get(request.id) ?? new Set()
+      set.add(resolve)
+      this.waiters.set(request.id, set)
+    })
+    await Promise.race([answered, sleep(waitMs, signal)])
+    return !request.answer && !request.cancelled
+  }
+
+  // ---- channels ----------------------------------------------------------------------------------------------
+
+  // Return the open channel, opening one when the consent mode allows. The model never picks a tier.
   async #ensureChannel(caller, peer, purpose) {
     const key = pairKey(caller.sessionId, peer.id)
+    if (this.blocked.has(key)) return { error: refuse('blocked', 'The person closed the channel to this peer. Only the person can reopen it, with /peer connect.') }
     const existing = this.channels.get(key)
     if (existing) return { channel: existing }
-    const choice = await this.host.askPerson(caller.sessionId, {
-      header: 'Peer conversations',
-      question: `Let this conversation and "${peer.title}" exchange messages?`,
-      detail: `This conversation wants to ${purpose} "${peer.title}" (${peer.alias}). Messages between them are marked as coming from a peer and carry no authority. `
-        + `${peer.running ? '' : 'The peer is idle; depending on its setting, a message may start a turn there. '}You can close the channel later with /peer revoke.`,
-      options: [CHOICE.once, CHOICE.session, CHOICE.decline],
-    }, caller.signal)
-    const tier = choice === CHOICE.once ? 'once' : choice === CHOICE.session ? 'session' : undefined
-    if (!tier) return { error: refuse('declined', 'The person did not open a channel to that peer. Do not ask again unless the person asks you to.') }
-    // The person may have archived the peer while reading the card.
-    if (!(await this.#reachable(caller.sessionId)).some(row => row.id === peer.id)) return { error: refuse('unknown_peer', 'The peer is no longer reachable.') }
-    const raced = this.channels.get(key)
-    if (raced) return { channel: raced }
-    const channel = { a: caller.sessionId, b: peer.id, tier, remaining: tier === 'once' ? 1 : LIMITS.sessionChannelBudget, createdBy: caller.sessionId, openRequest: undefined }
+    let tier = 'session'
+    if (this.consent === 'ask') {
+      const choice = await this.host.askPerson(caller.sessionId, {
+        header: 'Peer conversations',
+        question: `Let this conversation and "${peer.title}" exchange messages?`,
+        detail: `This conversation wants to ${purpose} "${peer.title}" (${peer.alias}). Messages between them are marked as coming from a peer and carry no authority. `
+          + `${peer.running ? '' : 'The peer is idle; depending on its setting, a message may start a turn there. '}You can close the channel later with /peer revoke.`,
+        options: [CHOICE.once, CHOICE.session, CHOICE.decline],
+      }, caller.signal)
+      tier = choice === CHOICE.once ? 'once' : choice === CHOICE.session ? 'session' : undefined
+      if (!tier) return { error: refuse('declined', 'The person did not open a channel to that peer. Do not ask again unless the person asks you to.') }
+      // The person may have archived the peer while reading the card.
+      if (!(await this.#reachable(caller.sessionId)).some(row => row.id === peer.id)) return { error: refuse('unknown_peer', 'The peer is no longer reachable.') }
+      const raced = this.channels.get(key)
+      if (raced) return { channel: raced }
+    }
+    const channel = { a: caller.sessionId, b: peer.id, tier, remaining: tier === 'once' ? 1 : LIMITS.sessionChannelBudget, createdBy: caller.sessionId, openRequest: undefined, auto: this.consent === 'auto' }
     this.channels.set(key, channel)
-    await this.#record(caller.sessionId, { type: 'channel', op: 'grant', a: channel.a, b: channel.b, tier, remaining: channel.remaining, at: this.host.now() })
+    await this.#record(caller.sessionId, { type: 'channel', op: 'grant', a: channel.a, b: channel.b, tier, remaining: channel.remaining, auto: channel.auto, at: this.host.now() })
     return { channel }
   }
 
@@ -148,15 +183,20 @@ export class Parlella {
     if (channel.tier === 'once') {
       // One exchange: a notice, or a request and its reply.
       if (kind === 'request') { channel.openRequest = requestId; return }
-      if (kind === 'reply' || kind === 'notice') { await this.#close(key, channel); return }
+      await this.#close(key, channel, 'revoke'); return
     }
     channel.remaining -= 1
-    if (channel.remaining <= 0) await this.#close(key, channel)
+    // An automatic channel renews itself; a person-granted one ends at its budget.
+    if (channel.remaining <= 0) {
+      if (channel.auto) channel.remaining = LIMITS.sessionChannelBudget
+      else await this.#close(key, channel, 'revoke')
+    }
   }
 
-  async #close(key, channel) {
+  async #close(key, channel, op) {
     this.channels.delete(key)
-    await this.#record(channel.createdBy, { type: 'channel', op: 'revoke', a: channel.a, b: channel.b, at: this.host.now() })
+    if (op === 'block') this.blocked.add(key)
+    await this.#record(channel.createdBy, { type: 'channel', op, a: channel.a, b: channel.b, at: this.host.now() })
   }
 
   // ---- person-only acts (slash commands, never tools) ----------------------------------------------------------
@@ -165,20 +205,22 @@ export class Parlella {
     const found = await this.#resolve(sessionId, peerRef)
     if (found.error) return found.error
     if (tier !== 'once' && tier !== 'session') return refuse('bad_tier', 'Tier is once or session.')
-    const channel = { a: sessionId, b: found.peer.id, tier, remaining: tier === 'once' ? 1 : LIMITS.sessionChannelBudget, createdBy: sessionId, openRequest: undefined }
-    this.channels.set(pairKey(sessionId, found.peer.id), channel)
+    const key = pairKey(sessionId, found.peer.id)
+    this.blocked.delete(key)
+    const channel = { a: sessionId, b: found.peer.id, tier, remaining: tier === 'once' ? 1 : LIMITS.sessionChannelBudget, createdBy: sessionId, openRequest: undefined, auto: false }
+    this.channels.set(key, channel)
     await this.#record(sessionId, { type: 'channel', op: 'grant', a: channel.a, b: channel.b, tier, remaining: channel.remaining, at: this.host.now() })
     return { ok: true, peer: found.peer.alias, tier }
   }
 
+  // Close the pair and keep it closed, so an automatic channel cannot reopen it.
   async personRevoke(sessionId, peerRef) {
     const found = await this.#resolve(sessionId, peerRef)
     if (found.error) return found.error
     const key = pairKey(sessionId, found.peer.id)
-    const channel = this.channels.get(key)
-    if (!channel) return { ok: true, peer: found.peer.alias, already: true }
-    await this.#close(key, channel)
-    return { ok: true, peer: found.peer.alias }
+    const channel = this.channels.get(key) ?? { a: sessionId, b: found.peer.id, createdBy: sessionId }
+    await this.#close(key, { ...channel, createdBy: sessionId }, 'block')
+    return { ok: true, peer: found.peer.alias, blocked: true }
   }
 
   async personSetWake(sessionId, setting) {
@@ -191,7 +233,7 @@ export class Parlella {
   // ---- tools -------------------------------------------------------------------------------------------------
 
   #gate(caller) {
-    if (!caller?.sessionId) return refuse('no_caller', 'Parlella tools need a calling conversation.')
+    if (!caller?.sessionId) return refuse('no_caller', 'Parallax tools need a calling conversation.')
     if (!caller.root) return refuse('subagent', 'Only a top-level conversation may use peer tools; a subagent reports to its parent instead.')
     return undefined
   }
@@ -203,38 +245,64 @@ export class Parlella {
     const byId = new Map(rows.map(row => [row.id, row]))
     const channels = [...this.channels.values()].filter(c => c.a === caller.sessionId || c.b === caller.sessionId).map(c => {
       const other = c.a === caller.sessionId ? c.b : c.a
-      return { peer: aliasOf(other), title: byId.get(other)?.title, tier: c.tier, remaining: c.tier === 'once' ? (c.openRequest ? 'reply only' : 'one exchange') : c.remaining }
+      return { peer: aliasOf(other), title: byId.get(other)?.title, tier: c.auto ? 'automatic' : c.tier, remaining: c.tier === 'once' ? (c.openRequest ? 'reply only' : 'one exchange') : c.remaining }
     })
     const requests = [...this.requests.values()].filter(r => !r.cancelled && !r.answer && (r.asker === caller.sessionId || r.target === caller.sessionId)).map(r => ({
       id: r.id, direction: r.asker === caller.sessionId ? 'you asked' : 'you owe an answer',
       peer: aliasOf(r.asker === caller.sessionId ? r.target : r.asker), state: this.#requestState(r, now),
     }))
+    const delegated = [...this.children].filter(([, child]) => child.parent === caller.sessionId).map(([id, child]) => ({
+      peer: aliasOf(id), title: child.title, state: byId.get(id) ? (byId.get(id).running ? 'running' : 'idle') : 'gone',
+      startedAt: new Date(child.startedAt).toISOString(), reports: child.reports, ...(child.lastReportAt ? { lastReportAt: new Date(child.lastReportAt).toISOString() } : {}),
+    }))
+    const parent = this.children.get(caller.sessionId)?.parent
     return {
       ok: true,
       conversations: rows.map(row => ({ peer: row.alias, id: row.id, title: row.title, state: row.running ? 'running' : 'idle' })),
-      channels, requests, hop: `${this.#hopFor(caller.sessionId, now)}/${LIMITS.hops}`, wake: this.#wakeOf(caller.sessionId),
+      channels, requests, delegated, ...(parent ? { delegatedBy: aliasOf(parent) } : {}),
+      blocked: [...this.blocked].map(key => key.split('\u0000')).filter(pair => pair.includes(caller.sessionId)).map(pair => aliasOf(pair[0] === caller.sessionId ? pair[1] : pair[0])),
+      hop: `${this.#hopFor(caller.sessionId, now)}/${this.maxHops}`, wake: this.#wakeOf(caller.sessionId), consent: this.consent,
     }
   }
 
-  async peer_send(caller, args) {
+  async peer_send(caller, args = {}) {
     const gate = this.#gate(caller); if (gate) return gate
-    const kind = args?.kind
+    const many = Array.isArray(args.broadcast) ? args.broadcast : Array.isArray(args.to) ? args.to : undefined
+    if (!many) return this.#sendOne(caller, args)
+    // Broadcast: the same message to several peers; one failure does not stop the others.
+    const targets = [...new Set(many.map(String))]
+    if (!targets.length) return refuse('no_peer', 'Name at least one peer.')
+    if (targets.length > BROADCAST_MAX) return refuse('too_many', `At most ${BROADCAST_MAX} peers per broadcast.`)
+    if (args.kind === 'reply' || args.replyTo !== undefined || args.supersedes !== undefined) return refuse('bad_broadcast', 'A broadcast is a notice or a request; reply and supersede one peer at a time.')
+    if (args.waitMs) return refuse('bad_broadcast', 'waitMs waits for one answer; for a broadcast request, call peer_receipt on each request id.')
+    const results = []
+    for (const to of targets) results.push({ to, ...(await this.#sendOne(caller, { ...args, broadcast: undefined, to })) })
+    return { ok: results.some(result => result.ok), results }
+  }
+
+  async #sendOne(caller, args) {
+    const kind = args.kind
     if (!['notice', 'request', 'reply'].includes(kind)) return refuse('bad_kind', 'kind is notice, request or reply.')
     const summary = String(args.summary ?? '').trim()
     const body = args.body === undefined ? '' : String(args.body)
     if (!summary) return refuse('no_summary', 'A one-line summary is required.')
     if (summary.length > LIMITS.summary) return refuse('summary_too_long', `The summary is ${summary.length} characters; the limit is ${LIMITS.summary}.`)
     if (byteLength(body) > LIMITS.body) return refuse('body_too_long', `The body is over ${LIMITS.body} bytes. Pass file paths instead of contents.`)
-    if (containsMarker(summary, body)) return refuse('marker', `The message contains the text "${MARKER}", which only Parlella may write. Remove it.`)
+    if (containsMarker(summary, body)) return refuse('marker', `The message contains the text "${MARKER}", which only Parallax may write. Remove it.`)
+    if (args.urgent && args.wake === false) return refuse('bad_options', 'urgent delivers at the peer\'s next step and wakes it; it cannot be combined with wake: false.')
     const found = await this.#resolve(caller.sessionId, args.to)
     if (found.error) return found.error
     const peer = found.peer
     const now = this.host.now()
 
-    // Replies are accepted only along the asker-to-target edge.
+    // Replies are accepted only along the asker-to-target edge. With no replyTo, the one open request from this peer is meant.
     let answering
     if (kind === 'reply') {
-      answering = this.requests.get(String(args.replyTo ?? ''))
+      if (args.replyTo === undefined) {
+        const open = [...this.requests.values()].filter(r => r.asker === peer.id && r.target === caller.sessionId && !r.answer && !r.cancelled)
+        if (open.length !== 1) return refuse('bad_reply', open.length ? `This peer has ${open.length} open requests to you; set replyTo to one of ${open.map(r => r.id).join(', ')}.` : 'This peer has no open request to you. Send a notice instead.')
+        answering = open[0]
+      } else answering = this.requests.get(String(args.replyTo))
       if (!answering || answering.target !== caller.sessionId || answering.asker !== peer.id) return refuse('bad_reply', 'replyTo must name a request that this peer sent you. Check peer_inbox with pending: true.')
       if (answering.answer) return refuse('already_answered', 'That request already has an answer.')
       if (answering.cancelled) return refuse('cancelled', 'The peer withdrew that request.')
@@ -252,10 +320,19 @@ export class Parlella {
       if (!ms) return refuse('bad_deadline', 'replyWithin is a duration such as "90s", "30m", "4h" or "2d" (at most 7 days).')
       dueAt = now + ms
     }
+    if (args.waitMs && kind !== 'request') return refuse('bad_wait', 'waitMs waits for an answer, so it needs kind "request".')
+
+    // A superseded message must be the caller's own, to the same peer.
+    let superseding
+    if (args.supersedes !== undefined) {
+      superseding = this.messages.get(String(args.supersedes))
+      if (!superseding || superseding.from !== caller.sessionId || superseding.to !== peer.id) return refuse('bad_supersede', 'supersedes must name a message you sent to this peer.')
+      if (superseding.cancelled) superseding = undefined
+    }
 
     // The hop check runs before consent, so a refused send never shows the person a card. A reply ends a chain at its request's hop.
     const hop = answering ? this.messages.get(answering.messageId)?.hop ?? 1 : this.#hopFor(caller.sessionId, now)
-    if (hop > LIMITS.hops) return refuse('hop_limit', `This would be hop ${hop}; the limit is ${LIMITS.hops}. A chain of peer messages stops here; tell the person instead.`)
+    if (hop > this.maxHops) return refuse('hop_limit', `This would be hop ${hop}; the limit is ${this.maxHops}. A chain of peer messages stops here; tell the person instead.`)
     if (!this.#rateOk(caller.sessionId, peer.id, now)) return refuse('rate_limit', `More than ${LIMITS.perPairPerMinute} messages to this peer in a minute. Wait and send one combined message.`)
 
     const opened = await this.#ensureChannel(caller, peer, kind === 'request' ? 'ask a question of' : 'send a message to')
@@ -267,32 +344,55 @@ export class Parlella {
 
     const id = `m_${this.host.randomId()}`
     const requestId = kind === 'request' ? `r_${this.host.randomId()}` : undefined
-    const self = (await this.host.list()).find(row => row.id === caller.sessionId)
+    const self = (await this.host.list(caller.sessionId)).find(row => row.id === caller.sessionId)
     const message = {
       id, kind, from: caller.sessionId, to: peer.id, fromTitle: self?.title ?? 'a conversation', fromAlias: aliasOf(caller.sessionId),
-      summary, body, requestId, replyTo: answering?.id, dueAt, hop, sentAt: now, hostMessageId: undefined, cancelled: false,
+      summary, body, requestId, replyTo: answering?.id, dueAt, hop, maxHops: this.maxHops, sentAt: now, hostMessageId: undefined, cancelled: false,
+      ...(superseding ? { supersedes: superseding.id } : {}),
     }
     const setting = this.#wakeOf(peer.id)
-    const wakeup = setting === 'always' || (setting === 'replies' && kind === 'reply')
+    const wakeup = args.urgent ? true : args.wake === false ? false : setting === 'always' || (setting === 'replies' && kind === 'reply')
+    const meta = { parallaxId: id, kind, from: caller.sessionId, requestId, replyTo: answering?.id, hop }
     let delivered
+    let superseded = false
+    // When the asker is blocked in peer_send or peer_receipt waiting for this answer, the answer goes back in that call
+    // only. Queuing it as well would start a second turn that rereads the same answer (seen in dsh, 2026-11-10).
+    const inline = Boolean(answering && this.waiters.get(answering.id)?.size)
     try {
-      delivered = await this.host.deliver(peer.id, { text: formatDelivered(message), wakeup, meta: { parlellaId: id, kind, from: caller.sessionId, requestId, replyTo: answering?.id, hop } })
+      if (inline) delivered = { messageId: undefined }
+      else if (superseding?.hostMessageId) {
+        delivered = await this.host.replace(peer.id, superseding.hostMessageId, { text: formatDelivered(message), meta })
+        superseded = Boolean(delivered)
+      }
+      if (!delivered) delivered = await this.host.deliver(peer.id, { text: formatDelivered(message), target: args.urgent ? 'next-step' : 'next-turn', wakeup, meta })
     } catch (error) {
       return refuse('not_delivered', `The peer could not be reached: ${clip(error?.message ?? error, 200)}`)
     }
     message.hostMessageId = delivered?.messageId
     this.messages.set(id, message)
     this.rate.get(`${caller.sessionId}\u0000${peer.id}`).push(now)
-    const inbox = this.inboxes.get(peer.id) ?? []
+    const inbox = (this.inboxes.get(peer.id) ?? []).filter(other => !(superseded && other === superseding.id))
     inbox.push(id)
     while (inbox.length > LIMITS.inbox) inbox.shift()
     this.inboxes.set(peer.id, inbox)
-    const seen = this.hopsSeen.get(peer.id) ?? []
-    seen.push({ hop, at: now })
-    this.hopsSeen.set(peer.id, seen)
+    // A reply ends a chain, so receiving one does not raise the receiver's hop count.
+    if (kind !== 'reply') {
+      const seen = this.hopsSeen.get(peer.id) ?? []
+      seen.push({ hop, at: now })
+      this.hopsSeen.set(peer.id, seen)
+    }
+    if (superseded) {
+      superseding.cancelled = true
+      const old = superseding.requestId && this.requests.get(superseding.requestId)
+      if (old) { old.cancelled = true; await this.#record(old.asker, { type: 'request', op: 'cancelled', id: old.id, asker: old.asker }) }
+    }
+    const child = this.children.get(caller.sessionId)
+    if (child && child.parent === peer.id) { child.reports += 1; child.lastReportAt = now }
 
+    let request
     if (requestId) {
-      this.requests.set(requestId, { id: requestId, asker: caller.sessionId, target: peer.id, messageId: id, dueAt, answer: undefined, cancelled: false })
+      request = { id: requestId, asker: caller.sessionId, target: peer.id, messageId: id, dueAt, answer: undefined, cancelled: false }
+      this.requests.set(requestId, request)
       await this.#record(caller.sessionId, { type: 'request', op: 'open', id: requestId, asker: caller.sessionId, target: peer.id, messageId: id, dueAt })
     }
     if (answering) {
@@ -302,10 +402,21 @@ export class Parlella {
       this.waiters.delete(answering.id)
     }
     await this.#spend(channel, kind, requestId)
-    return {
-      ok: true, id, ...(requestId ? { requestId } : {}), to: peer.alias, state: 'accepted', woke: wakeup, hop: `${hop}/${LIMITS.hops}`,
-      note: requestId ? 'Queued. Use peer_receipt with the request id to wait for the answer.' : 'Queued. Accepted means queued, not read or answered.',
+    const out = {
+      ok: true, id, ...(requestId ? { requestId } : {}), ...(answering ? { replyTo: answering.id } : {}), to: peer.alias, state: inline ? 'returned to the waiting asker' : 'accepted', woke: inline ? false : wakeup,
+      delivery: args.urgent ? 'next step' : 'next turn', hop: `${hop}/${this.maxHops}`,
+      ...(superseding ? { superseded: superseded ? superseding.id : `not replaced: ${superseding.id} was already claimed, so this was sent as a new message` } : {}),
     }
+    // Ask and wait in one call (pi-intercom's ask).
+    if (request && args.waitMs) {
+      const timedOut = await this.#waitForAnswer(request, Math.max(1, Math.min(Number(args.waitMs) || 0, LIMITS.waitMsMax)), caller.signal)
+      out.request = this.#requestState(request, this.host.now())
+      if (request.answer) out.reply = this.#replyView(request)
+      if (timedOut) out.timedOut = true
+      return out
+    }
+    out.note = requestId ? 'Queued. Use peer_receipt with the request id, or waitMs here, to wait for the answer.' : 'Queued. Accepted means queued, not read or answered.'
+    return out
   }
 
   async peer_inbox(caller, args = {}) {
@@ -345,10 +456,7 @@ export class Parlella {
       if (request) {
         out.requestId = request.id
         out.request = this.#requestState(request, this.host.now())
-        if (request.answer) {
-          const reply = this.messages.get(request.answer)
-          out.reply = reply ? { id: reply.id, summary: escapeText(reply.summary), text: formatDelivered(reply) } : { id: request.answer, note: 'The reply arrived before a restart; its text is in your conversation.' }
-        }
+        if (request.answer) out.reply = this.#replyView(request)
       }
       if (timedOut) out.timedOut = true
       return out
@@ -368,17 +476,9 @@ export class Parlella {
 
     const waitMs = Math.max(0, Math.min(Number(args.waitMs) || 0, LIMITS.waitMsMax))
     if (!waitMs) return report(false)
+    // A request waits for the reply itself, not for delivery.
+    if (request && !request.answer && !request.cancelled) return report(await this.#waitForAnswer(request, waitMs, caller.signal))
     const deadline = this.host.now() + waitMs
-    if (request && !request.answer && !request.cancelled) {
-      // Wait for the reply itself, not for delivery.
-      const answered = new Promise(resolve => {
-        const set = this.waiters.get(request.id) ?? new Set()
-        set.add(resolve)
-        this.waiters.set(request.id, set)
-      })
-      await Promise.race([answered, sleep(waitMs, caller.signal)])
-      return report(!request.answer && !request.cancelled)
-    }
     const start = message.cancelled ? 'discarded' : message.hostMessageId ? await this.host.deliveryState(message.to, message.hostMessageId) : 'unknown'
     while (this.host.now() < deadline && !caller.signal?.aborted) {
       await sleep(Math.min(500, Math.max(1, deadline - this.host.now())), caller.signal)
@@ -423,22 +523,29 @@ export class Parlella {
     const title = clip(String(args.title ?? '').trim() || task.split('\n')[0], 80)
     if (!task) return refuse('no_task', 'Describe the task.')
     if (byteLength(task) > LIMITS.delegateTask) return refuse('task_too_long', `The task is over ${LIMITS.delegateTask} bytes. Pass file paths instead of contents.`)
-    if (containsMarker(task, title)) return refuse('marker', `The task contains the text "${MARKER}", which only Parlella may write. Remove it.`)
-    const choice = await this.host.askPerson(caller.sessionId, {
-      header: 'Delegate a task',
-      question: `Start a new conversation, "${title}", for this task?`,
-      detail: `${clip(task, 1200)}\n\nIts permissions will be no wider than this conversation's. It can report back here with peer messages.`,
-      options: ['Start it', 'Decline'],
-    }, caller.signal)
-    if (choice !== 'Start it') return refuse('declined', 'The person did not approve the delegation.')
+    if (containsMarker(task, title)) return refuse('marker', `The task contains the text "${MARKER}", which only Parallax may write. Remove it.`)
+    const permission = args.permission === undefined ? undefined : String(args.permission)
+    if (this.delegateApproval === 'ask') {
+      const choice = await this.host.askPerson(caller.sessionId, {
+        header: 'Delegate a task',
+        question: `Start a new conversation, "${title}", for this task?`,
+        detail: `${clip(task, 1200)}\n\nIts permissions will be no wider than this conversation's. It can report back here with peer messages.`,
+        options: ['Start it', 'Decline'],
+      }, caller.signal)
+      if (choice !== 'Start it') return refuse('declined', 'The person did not approve the delegation.')
+    }
     let result
-    try { result = await this.host.delegate(caller.sessionId, { task, title }) } catch (error) {
+    try { result = await this.host.delegate(caller.sessionId, { task, title, ...(permission ? { permission } : {}) }) } catch (error) {
       return refuse('not_started', `The new conversation did not start: ${clip(error?.message ?? error, 200)}`)
     }
     if (!result?.childId) return refuse('not_started', result?.refused ?? 'The host did not start the new conversation.')
-    const channel = { a: caller.sessionId, b: result.childId, tier: 'session', remaining: LIMITS.sessionChannelBudget, createdBy: caller.sessionId, openRequest: undefined }
+    const now = this.host.now()
+    const channel = { a: caller.sessionId, b: result.childId, tier: 'session', remaining: LIMITS.sessionChannelBudget, createdBy: caller.sessionId, openRequest: undefined, auto: true }
     this.channels.set(pairKey(caller.sessionId, result.childId), channel)
-    await this.#record(caller.sessionId, { type: 'channel', op: 'grant', a: channel.a, b: channel.b, tier: 'session', remaining: channel.remaining, at: this.host.now() })
-    return { ok: true, child: aliasOf(result.childId), childId: result.childId, title, note: 'Started. A channel to it is open; it can report back with peer_send.' }
+    this.children.set(result.childId, { parent: caller.sessionId, title, startedAt: now, lastReportAt: undefined, reports: 0 })
+    await this.#record(caller.sessionId, { type: 'channel', op: 'grant', a: channel.a, b: channel.b, tier: 'session', remaining: channel.remaining, auto: true, at: now })
+    await this.#record(caller.sessionId, { type: 'child', childId: result.childId, title, at: now })
+    return { ok: true, child: aliasOf(result.childId), childId: result.childId, title, ...(result.permission ? { permission: result.permission } : {}),
+      note: 'Started. It reports back with peer_send; peer_list shows it under delegated, and peer_context reads its progress.' }
   }
 }
