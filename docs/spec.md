@@ -39,10 +39,17 @@ asker-to-target edge, and two conversations cannot ask each other at the same ti
 
 ## 2. Delivery in dsh
 
-`ctx.sessionController.resolveAgent(id)` returns the target (restoring a stored one); `agent.followup(message)` queues it
-for the next turn; `ctx.sessions.flush(session)` confirms it is persisted, which is the queued receipt. Parlella never uses
-`steer`, which interrupts a running step; delivery goes through `agent.send` with the receiver's wake setting. Receipts are read from the receiver's own inbox events, so they survive a
-restart.
+`ctx.sessionController.resolveAgent(id)` returns the target (restoring a stored one). Parlella queues the message with
+`agent.send(message, 'next-turn', wakeup)`, where `wakeup` follows the receiver's setting, and `ctx.sessions.flush(session)`
+persists it. Parlella never uses `steer`, which interrupts a running step. The message source is
+`{kind: 'peer', form: 'relay', senderSessionId}`, so dsh renders it as a relay row from the sender. Receipts are read from
+the receiver's `agent/inbox/spliced` and `user/message` events (still in the inbox = queued, spliced out = claimed,
+spliced out with `outcome: 'canceled'` = discarded), so they survive a restart.
+
+Delegation creates a top-level conversation in the caller's folder with `ctx.sessionController.create`, sets the caller's
+permission preset with `ctx.permissionPresets.set`, reads it back with `current`, and only then queues the task with
+`followup`. A caller with its own sandbox or approval override is refused, because Parlella cannot yet copy an override
+exactly.
 
 Each receiver has a setting for whether inbound messages may start a turn: `always`, `replies` (only answers to its own
 requests) or `never` (pi-intercom `inboundTrigger`). A broken setting falls back to `never`.

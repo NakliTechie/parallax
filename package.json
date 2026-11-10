@@ -1,0 +1,20 @@
+{
+  "name": "dsh-parlella",
+  "version": "0.1.0-dev",
+  "description": "Conversations in DeepSeek Harness (dsh) that talk to each other: send, ask and reply with receipts, delegate with approval, read a bounded peer summary.",
+  "license": "MIT",
+  "type": "module",
+  "private": true,
+  "main": "src/dsh.js",
+  "exports": {
+    ".": "./src/dsh.js",
+    "./core": "./src/core.js",
+    "./manifest": "./src/manifest.js"
+  },
+  "files": ["src", "README.md", "LICENSE"],
+  "keywords": ["dsh", "dsh-plugin", "deepseek-harness", "agents", "messaging"],
+  "scripts": {
+    "test": "node --import ./test/stubs/register.mjs --test test/*.test.mjs"
+  },
+  "engines": { "node": ">=20" }
+}

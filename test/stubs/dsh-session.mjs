@@ -1,0 +1,2 @@
+export function appendPluginRecord(session, type, data) { session.events.push({ type, ignorable: true, seq: session.events.length, time: Date.now(), data: structuredClone(data) }); return session.events.length - 1 }
+export function pluginRecordOf(event) { return event.ignorable === true && event.type.startsWith('plugin:') ? { type: event.type, seq: event.seq, time: event.time, data: event.data } : undefined }
