@@ -1,6 +1,6 @@
 // DeepSeek Harness (dsh) adapter: a Cordis plugin that registers Parallax's six tools and its /peer commands.
 // All behaviour lives in core.js; this file only maps dsh's context services onto the core's `host` object.
-// API facts and their source lines: plan/research/2026-11-10-dsh-plugin-api.md (dsh v0.2.1-rc.5).
+// API facts and their source lines: docs/dsh-plugin-api.md (dsh v0.2.1-rc.5).
 
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'

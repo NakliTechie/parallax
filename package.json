@@ -1,20 +1,32 @@
 {
   "name": "dsh-parallax",
-  "version": "0.1.0-dev.2",
+  "version": "0.1.0",
   "description": "Conversations in DeepSeek Harness (dsh) that talk to each other: send, ask and reply with receipts, delegate with approval, read a bounded peer summary.",
   "license": "MIT",
+  "author": "NakliTechie",
+  "homepage": "https://github.com/NakliTechie/parallax#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/NakliTechie/parallax.git"
+  },
+  "bugs": {
+    "url": "https://github.com/NakliTechie/parallax/issues"
+  },
   "type": "module",
-  "private": true,
   "main": "src/dsh.js",
   "exports": {
     ".": "./src/dsh.js",
     "./core": "./src/core.js",
-    "./manifest": "./src/manifest.js"
+    "./manifest": "./src/manifest.js",
+    "./locale/*": "./locale/*",
+    "./package.json": "./package.json"
   },
   "files": [
     "src",
+    "locale",
     "cordis.patch.yml",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE"
   ],
   "keywords": [
@@ -22,7 +34,9 @@
     "dsh-plugin",
     "deepseek-harness",
     "agents",
-    "messaging"
+    "multi-agent",
+    "messaging",
+    "delegation"
   ],
   "scripts": {
     "test": "node --import ./test/stubs/register.mjs --test test/*.test.mjs"

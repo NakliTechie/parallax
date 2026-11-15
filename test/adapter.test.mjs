@@ -1,4 +1,4 @@
-// The dsh adapter against a stand-in dsh context built from the signatures in plan/research/2026-11-10-dsh-plugin-api.md.
+// The dsh adapter against a stand-in dsh context built from the signatures in docs/dsh-plugin-api.md.
 // This checks the wiring, not dsh itself; a run in real dsh is a separate check.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
