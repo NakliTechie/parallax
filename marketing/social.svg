@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#2F7D4F"/>
+    </marker>
+  </defs>
+  <rect width="1280" height="640" fill="#F7F6F2"/>
+  <rect x="0" y="0" width="1280" height="8" fill="#2F7D4F"/>
+
+  <!-- left -->
+  <text x="72" y="170" font-family="Helvetica Neue, Helvetica, Arial" font-weight="700" font-size="96" fill="#161616">Parallax</text>
+  <text x="74" y="236" font-family="Helvetica Neue, Helvetica, Arial" font-size="31" fill="#2B2B2B">DeepSeek Harness conversations that</text>
+  <text x="74" y="278" font-family="Helvetica Neue, Helvetica, Arial" font-size="31" fill="#2B2B2B">message each other and hand off tasks.</text>
+  <text x="74" y="340" font-family="Helvetica Neue, Helvetica, Arial" font-size="22" fill="#55524C">It adds six tools. A child never gets wider</text>
+  <text x="74" y="370" font-family="Helvetica Neue, Helvetica, Arial" font-size="22" fill="#55524C">permissions than its parent, and a message</text>
+  <text x="74" y="400" font-family="Helvetica Neue, Helvetica, Arial" font-size="22" fill="#55524C">from a peer carries no authority.</text>
+  <rect x="72" y="440" width="560" height="58" rx="10" fill="#161616"/>
+  <text x="96" y="477" font-family="Menlo, monospace" font-size="20" fill="#E9F5EC">dsh plugin --profile web add dsh-parallax</text>
+  <text x="74" y="560" font-family="Helvetica Neue, Helvetica, Arial" font-size="20" fill="#55524C">MIT · npm dsh-parallax · github.com/NakliTechie/parallax</text>
+
+  <!-- right: conversations -->
+  <g font-family="Helvetica Neue, Helvetica, Arial">
+    <rect x="690" y="86" width="230" height="96" rx="14" fill="#FFFFFF" stroke="#D8D5CC" stroke-width="2"/>
+    <text x="712" y="124" font-size="22" font-weight="700" fill="#161616">Conversation A</text>
+    <text x="712" y="156" font-size="17" fill="#55524C">asks and delegates</text>
+
+    <rect x="1000" y="86" width="210" height="96" rx="14" fill="#FFFFFF" stroke="#D8D5CC" stroke-width="2"/>
+    <text x="1022" y="124" font-size="22" font-weight="700" fill="#161616">Conversation B</text>
+    <text x="1022" y="156" font-size="17" fill="#55524C">answers</text>
+
+    <rect x="690" y="420" width="230" height="96" rx="14" fill="#FFFFFF" stroke="#D8D5CC" stroke-width="2"/>
+    <text x="712" y="458" font-size="22" font-weight="700" fill="#161616">Child</text>
+    <text x="712" y="490" font-size="17" fill="#55524C">runs a side task</text>
+  </g>
+  <g font-family="Menlo, monospace" font-size="16" fill="#1F5C39">
+    <line x1="922" y1="112" x2="996" y2="112" stroke="#2F7D4F" stroke-width="2.5" marker-end="url(#ah)"/>
+    <line x1="998" y1="158" x2="924" y2="158" stroke="#2F7D4F" stroke-width="2.5" marker-end="url(#ah)"/>
+    <text x="940" y="232">ask: "What is 6 times 7?"</text>
+    <text x="940" y="258">reply: "6 times 7 is 42."</text>
+    <line x1="770" y1="186" x2="770" y2="414" stroke="#2F7D4F" stroke-width="2.5" marker-end="url(#ah)"/>
+    <line x1="840" y1="416" x2="840" y2="188" stroke="#2F7D4F" stroke-width="2.5" marker-end="url(#ah)"/>
+    <text x="616" y="300" text-anchor="end" fill="none">.</text>
+    <text x="862" y="316">delegate ↓</text>
+    <text x="862" y="342">report ↑ done: "pong"</text>
+  </g>
+  <text x="690" y="572" font-family="Helvetica Neue, Helvetica, Arial" font-size="17" fill="#77736B">Messages from a real run on dsh 0.2.1-rc.5, 15 Nov 2026</text>
+</svg>
